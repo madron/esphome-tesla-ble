@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import ble_client, binary_sensor, button, switch, number, sensor, text_sensor, lock, cover, climate
+from esphome.components import ble_client, binary_sensor, button, switch, number, sensor, text_sensor, lock, cover, climate, mqtt
 from esphome.const import (
     CONF_ACCURACY_DECIMALS,
     CONF_DEVICE_CLASS,
@@ -9,6 +9,7 @@ from esphome.const import (
     CONF_FORCE_UPDATE,
     CONF_ICON,
     CONF_ID,
+    CONF_INTERNAL,
     CONF_MODE,
     CONF_NAME,
     CONF_RESTORE_MODE,
@@ -73,6 +74,23 @@ CONF_VIN = "vin"
 CONF_CHARGING_AMPS_MAX = "charging_amps_max"
 DEFAULT_CHARGING_AMPS_MAX = 32
 CONF_ROLE = "role"
+
+# Per-entity overrides, keyed by the entity "id" used in the lists below, e.g.:
+#   tesla_ble_vehicle:
+#     entities:
+#       climate: { disabled: true }        # entity is not created at all
+#       battery_level: { internal: true }  # created, hidden from UI/API/MQTT
+#       doors: { name: "Front Doors" }      # rename without editing the lists
+# This is what lets a fork/override keep customizations in YAML instead of
+# editing the ENTITY DEFINITIONS below.
+CONF_ENTITIES = "entities"
+ENTITY_OVERRIDE_SCHEMA = cv.Schema(
+    {
+        cv.Optional("disabled", default=False): cv.boolean,
+        cv.Optional("internal"): cv.boolean,
+        cv.Optional("name"): cv.string,
+    }
+)
 
 # Polling configuration constants
 CONF_VCSEC_POLL_INTERVAL = "vcsec_poll_interval"
@@ -236,6 +254,86 @@ NUMBERS = [
 ]
 
 # =============================================================================
+# MQTT WIRING
+# =============================================================================
+#
+# All entities above are built from plain dicts instead of being run through
+# each platform's own cv.Schema (e.g. sensor.sensor_schema()). That schema is
+# where ESPHome normally injects a `cv.OnlyWith(CONF_MQTT_ID, "mqtt")` default
+# that drives automatic MQTT publishing - skipping it means these entities
+# are otherwise invisible to MQTT even with `mqtt:` enabled (they still show
+# up fine over the native API, since that doesn't go through the same path).
+#
+# ESPHome also requires every Component id to have been seen during the
+# initial config-validation ID sweep (esphome/config.py's IDPassValidationStep)
+# before it can be registered as a component in to_code() - ids invented only
+# at codegen time fail with "Component ID ... was not declared to inherit
+# from Component". So each entity gets its own `cv.OnlyWith(..., "mqtt")` key
+# added to CONFIG_SCHEMA below (present only when `mqtt:` is loaded), exactly
+# mirroring what each platform's own schema does for its own entities.
+
+def _object_id(definition, suffix):
+    return f"tesla_{definition['id']}_{suffix}"
+
+
+def _mqtt_config_key(definition, suffix):
+    return f"{_object_id(definition, suffix)}_mqtt_id"
+
+
+# Maps our entity "suffix" (see _object_id) to the matching ESPHome MQTT
+# wrapper class.
+_MQTT_COMPONENT_CLASSES = {
+    "sensor": mqtt.MQTTSensorComponent,
+    "binary_sensor": mqtt.MQTTBinarySensorComponent,
+    "text_sensor": mqtt.MQTTTextSensor,
+    "button": mqtt.MQTTButtonComponent,
+    "switch": mqtt.MQTTSwitchComponent,
+    "lock": mqtt.MQTTLockComponent,
+    "cover": mqtt.MQTTCoverComponent,
+    "climate": mqtt.MQTTClimateComponent,
+    "number": mqtt.MQTTNumberComponent,
+}
+
+
+def _entity_specs():
+    """Yield (definition, suffix, mqtt_kind) for every entity this component creates."""
+    for definition in BINARY_SENSORS:
+        yield definition, "sensor", "binary_sensor"
+    for definition in SENSORS:
+        yield definition, "sensor", "sensor"
+    for definition in TEXT_SENSORS:
+        yield definition, "sensor", "text_sensor"
+    for definition in BUTTONS:
+        yield definition, "button", "button"
+    for definition in SWITCHES:
+        yield definition, "switch", "switch"
+    for definition in LOCKS:
+        yield definition, "lock", "lock"
+    for definition in COVERS:
+        yield definition, "cover", "cover"
+    for definition in NUMBERS:
+        yield definition, "number", "number"
+    yield CLIMATE, "climate", "climate"
+
+
+_MQTT_ID_SCHEMA = {
+    cv.OnlyWith(_mqtt_config_key(definition, suffix), "mqtt"): cv.declare_id(
+        _MQTT_COMPONENT_CLASSES[mqtt_kind]
+    )
+    for definition, suffix, mqtt_kind in _entity_specs()
+}
+
+
+async def _register_mqtt(top_config, entity, definition, suffix):
+    """Publish an entity via MQTT, using the id pre-declared in CONFIG_SCHEMA."""
+    mqtt_id = top_config.get(_mqtt_config_key(definition, suffix))
+    if mqtt_id is None:
+        return
+    mqtt_var = cg.new_Pvariable(mqtt_id, entity)
+    await mqtt.register_mqtt_component(mqtt_var, {})
+
+
+# =============================================================================
 # CONFIG SCHEMA
 # =============================================================================
 
@@ -251,6 +349,10 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_INFOTAINMENT_POLL_INTERVAL_AWAKE, default=30): cv.int_range(min=10, max=600), 
             cv.Optional(CONF_INFOTAINMENT_POLL_INTERVAL_ACTIVE, default=10): cv.int_range(min=5, max=120),
             cv.Optional(CONF_INFOTAINMENT_SLEEP_TIMEOUT, default=660): cv.int_range(min=60, max=3600),
+            cv.Optional(CONF_ENTITIES, default={}): cv.Schema(
+                {cv.string: ENTITY_OVERRIDE_SCHEMA}
+            ),
+            **_MQTT_ID_SCHEMA,
         },
     )
     .extend(cv.polling_component_schema("10s"))
@@ -269,16 +371,19 @@ def get_device_class_const(component_module, device_class_str):
     return getattr(component_module, f"DEVICE_CLASS_{device_class_str.upper()}", None)
 
 
-def _base_config(definition, id_type, suffix):
+def _base_config(definition, id_type, suffix, overrides=None):
+    overrides = overrides or {}
     config = {
-        CONF_ID: cv.declare_id(id_type)(f"tesla_{definition['id']}_{suffix}"),
-        CONF_NAME: definition["name"],
+        CONF_ID: cv.declare_id(id_type)(_object_id(definition, suffix)),
+        CONF_NAME: overrides.get("name", definition["name"]),
         CONF_DISABLED_BY_DEFAULT: definition.get("disabled_by_default", False),
     }
     if "icon" in definition:
         config[CONF_ICON] = definition["icon"]
     if definition.get("entity_category") == "diagnostic":
         config[CONF_ENTITY_CATEGORY] = ENTITY_CATEGORY_DIAGNOSTIC
+    if "internal" in overrides:
+        config[CONF_INTERNAL] = overrides["internal"]
     return config
 
 
@@ -290,26 +395,28 @@ def _with_device_class(config, module, definition):
     return config
 
 
-def _attach(var, entity, definition):
+async def _attach(var, entity, definition, top_config, mqtt_kind, suffix):
     cg.add(entity.set_parent(var))
     if definition.get("setter"):
         cg.add(getattr(var, definition["setter"])(entity))
+    await _register_mqtt(top_config, entity, definition, suffix)
     return entity
 
 
-async def create_binary_sensor(var, definition):
+async def create_binary_sensor(var, definition, top_config, overrides=None):
     """Create a binary sensor and register with TeslaBLEVehicle using generic setter."""
     config = _with_device_class(
-        _base_config(definition, binary_sensor.BinarySensor, "sensor"),
+        _base_config(definition, binary_sensor.BinarySensor, "sensor", overrides),
         binary_sensor, definition)
     sens = await binary_sensor.new_binary_sensor(config)
     cg.add(var.set_binary_sensor(definition["id"], sens))
+    await _register_mqtt(top_config, sens, definition, "sensor")
     return sens
 
 
-async def create_sensor(var, definition):
+async def create_sensor(var, definition, top_config, overrides=None):
     """Create a sensor and register with TeslaBLEVehicle using generic setter."""
-    config = _base_config(definition, sensor.Sensor, "sensor")
+    config = _base_config(definition, sensor.Sensor, "sensor", overrides)
     config[CONF_FORCE_UPDATE] = False
     if "unit" in definition:
         config[CONF_UNIT_OF_MEASUREMENT] = definition["unit"]
@@ -318,40 +425,44 @@ async def create_sensor(var, definition):
     config = _with_device_class(config, sensor, definition)
     sens = await sensor.new_sensor(config)
     cg.add(var.set_sensor(definition["id"], sens))
+    await _register_mqtt(top_config, sens, definition, "sensor")
     return sens
 
 
-async def create_text_sensor(var, definition):
+async def create_text_sensor(var, definition, top_config, overrides=None):
     """Create a text sensor and register with TeslaBLEVehicle using generic setter."""
-    config = _base_config(definition, text_sensor.TextSensor, "sensor")
+    config = _base_config(definition, text_sensor.TextSensor, "sensor", overrides)
     config[CONF_FORCE_UPDATE] = False
     sens = await text_sensor.new_text_sensor(config)
     if definition.get("setter"):
         cg.add(getattr(var, definition["setter"])(sens))
     else:
         cg.add(var.set_text_sensor(definition["id"], sens))
+    await _register_mqtt(top_config, sens, definition, "sensor")
     return sens
 
 
-async def create_button(var, definition):
+async def create_button(var, definition, top_config, overrides=None):
     """Create a button and register with TeslaBLEVehicle."""
-    return _attach(var, await button.new_button(
-        _base_config(definition, definition["class"], "button")), definition)
+    btn = await button.new_button(
+        _base_config(definition, definition["class"], "button", overrides))
+    return await _attach(var, btn, definition, top_config, "button", "button")
 
 
-async def create_switch(var, definition):
+async def create_switch(var, definition, top_config, overrides=None):
     """Create a switch and register with TeslaBLEVehicle."""
-    config = _base_config(definition, definition["class"], "switch")
+    config = _base_config(definition, definition["class"], "switch", overrides)
     config[CONF_RESTORE_MODE] = switch.RESTORE_MODES['RESTORE_DEFAULT_OFF']
-    return _attach(var, await switch.new_switch(config), definition)
+    sw = await switch.new_switch(config)
+    return await _attach(var, sw, definition, top_config, "switch", "switch")
 
 
-async def create_number(var, definition, config):
+async def create_number(var, definition, top_config, overrides=None):
     """Create a number and register with TeslaBLEVehicle."""
     max_val = definition["max"]
     if max_val == "config":
-        max_val = config.get(CONF_CHARGING_AMPS_MAX, DEFAULT_CHARGING_AMPS_MAX)
-    num_config = _base_config(definition, definition["class"], "number")
+        max_val = top_config.get(CONF_CHARGING_AMPS_MAX, DEFAULT_CHARGING_AMPS_MAX)
+    num_config = _base_config(definition, definition["class"], "number", overrides)
     num_config[CONF_MODE] = number.NUMBER_MODES['AUTO']
     if "unit" in definition:
         num_config[CONF_UNIT_OF_MEASUREMENT] = definition["unit"]
@@ -361,35 +472,35 @@ async def create_number(var, definition, config):
         max_value=max_val,
         step=definition["step"]
     )
-    return _attach(var, num, definition)
+    return await _attach(var, num, definition, top_config, "number", "number")
 
 
-async def create_lock(var, definition):
+async def create_lock(var, definition, top_config, overrides=None):
     """Create a lock and register with TeslaBLEVehicle."""
-    config = _base_config(definition, definition["class"], "lock")
+    config = _base_config(definition, definition["class"], "lock", overrides)
     lck = cg.new_Pvariable(config[CONF_ID])
     await lock.register_lock(lck, config)
-    return _attach(var, lck, definition)
+    return await _attach(var, lck, definition, top_config, "lock", "lock")
 
 
-async def create_cover(var, definition):
+async def create_cover(var, definition, top_config, overrides=None):
     """Create a cover and register with TeslaBLEVehicle."""
-    config = _base_config(definition, definition["class"], "cover")
+    config = _base_config(definition, definition["class"], "cover", overrides)
     if "device_class" in definition:
         config[CONF_DEVICE_CLASS] = definition["device_class"]
     cvr = cg.new_Pvariable(config[CONF_ID])
     await cover.register_cover(cvr, config)
-    return _attach(var, cvr, definition)
+    return await _attach(var, cvr, definition, top_config, "cover", "cover")
 
 
-async def create_climate_entity(var, definition):
+async def create_climate_entity(var, definition, top_config, overrides=None):
     """Create a climate entity and register with TeslaBLEVehicle."""
     from esphome.components.climate import CONF_VISUAL
-    config = _base_config(definition, definition["class"], "climate")
+    config = _base_config(definition, definition["class"], "climate", overrides)
     config.update({CONF_VISUAL: {}, CONF_ACCURACY_DECIMALS: 1})
     clm = cg.new_Pvariable(config[CONF_ID])
     await climate.register_climate(clm, config)
-    return _attach(var, clm, definition)
+    return await _attach(var, clm, definition, top_config, "climate", "climate")
 
 
 # =============================================================================
@@ -419,6 +530,11 @@ async def to_code(config):
     cg.add(var.set_infotainment_poll_interval_active(config[CONF_INFOTAINMENT_POLL_INTERVAL_ACTIVE] * 1000))
     cg.add(var.set_infotainment_sleep_timeout(config[CONF_INFOTAINMENT_SLEEP_TIMEOUT] * 1000))
     
+    entity_overrides = config[CONF_ENTITIES]
+
+    def _overrides_for(definition):
+        return entity_overrides.get(definition["id"])
+
     for creators in (
         (BINARY_SENSORS, create_binary_sensor),
         (SENSORS, create_sensor),
@@ -429,12 +545,20 @@ async def to_code(config):
         (COVERS, create_cover),
     ):
         for definition in creators[0]:
-            await creators[1](var, definition)
+            overrides = _overrides_for(definition)
+            if overrides and overrides.get("disabled"):
+                continue
+            await creators[1](var, definition, config, overrides)
 
     for definition in NUMBERS:
-        await create_number(var, definition, config)
+        overrides = _overrides_for(definition)
+        if overrides and overrides.get("disabled"):
+            continue
+        await create_number(var, definition, config, overrides)
 
-    await create_climate_entity(var, CLIMATE)
+    climate_overrides = _overrides_for(CLIMATE)
+    if not (climate_overrides and climate_overrides.get("disabled")):
+        await create_climate_entity(var, CLIMATE, config, climate_overrides)
 
 
 # =============================================================================
