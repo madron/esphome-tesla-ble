@@ -78,13 +78,17 @@ CONF_ROLE = "role"
 
 # Per-entity overrides, keyed by the entity "id" used in the lists below, e.g.:
 #   tesla_ble_vehicle:
-#     entities_default: none               # opt-in mode: everything off unless listed below
+#     entities_default: none   # opt-in mode: everything off unless listed below
 #     entities:
-#       climate: { disabled: true }        # entity is not created at all
-#       battery_level: { disabled: false, filters: [{sliding_window_moving_average: {window_size: 5, send_every: 5}}] }
-#       range: { disabled: false, unit: "km" }
-#       asleep: { disabled: false, filters: [{delayed_on: 30s}] }
-#       doors: { disabled: false, name: "Front Doors" }
+#       climate: { disabled: true }   # entity is not created at all
+#       # Listing an id at all - with or without other keys - means "keep
+#       # this one", regardless of entities_default. No need for a redundant
+#       # `disabled: false` unless you're overriding an explicit
+#       # entities_default: none default back off for this one id.
+#       battery_level: { filters: [{sliding_window_moving_average: {window_size: 5, send_every: 5}}] }
+#       range: { unit: "km" }
+#       asleep: { filters: [{delayed_on: 30s}] }
+#       doors: { name: "Front Doors" }
 # This is what lets a fork/override keep customizations in YAML instead of
 # editing the ENTITY DEFINITIONS below. `filters` only applies to sensor,
 # binary_sensor, and text_sensor entities (the read-only, publish_* driven
@@ -99,8 +103,9 @@ CONF_ENTITIES = "entities"
 CONF_ENTITIES_DEFAULT = "entities_default"
 _BASE_ENTITY_OVERRIDE_SCHEMA = cv.Schema(
     {
-        # No default here on purpose: presence/absence (not just true/false)
-        # is what lets entities_default: none mean "off unless mentioned".
+        # No default here on purpose: to_code() treats mere presence in
+        # `entities:` as "keep this one" when entities_default: none, and
+        # only consults this key when the id was explicitly disabled/enabled.
         cv.Optional("disabled"): cv.boolean,
         cv.Optional("internal"): cv.boolean,
         cv.Optional("name"): cv.string,
@@ -401,8 +406,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_INFOTAINMENT_SLEEP_TIMEOUT, default=660): cv.int_range(min=60, max=3600),
             # "all" (default): every entity is created unless explicitly
             # {disabled: true}. "none": opt-in - nothing is created unless
-            # explicitly {disabled: false} in `entities:`. Handy when you
-            # only want a handful of the ~35 entities this component defines.
+            # it's listed (with any keys, or none) under `entities:`. Handy
+            # when you only want a handful of the ~35 entities this
+            # component defines.
             cv.Optional(CONF_ENTITIES_DEFAULT, default="all"): cv.one_of(
                 "all", "none", lower=True
             ),
@@ -618,9 +624,12 @@ async def to_code(config):
 
     def _is_disabled(definition):
         overrides = _overrides_for(definition)
-        if overrides and "disabled" in overrides:
-            return overrides["disabled"]
-        return default_disabled
+        # Listing an id under `entities:` at all means "I want this one" -
+        # entities_default only decides the fate of ids that aren't
+        # mentioned. An explicit `disabled: true`/`false` still wins either way.
+        if overrides is None:
+            return default_disabled
+        return overrides.get("disabled", False)
 
     for creators in (
         (BINARY_SENSORS, create_binary_sensor),
