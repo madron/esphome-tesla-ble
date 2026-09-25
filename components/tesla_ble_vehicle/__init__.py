@@ -6,6 +6,7 @@ from esphome.const import (
     CONF_DEVICE_CLASS,
     CONF_DISABLED_BY_DEFAULT,
     CONF_ENTITY_CATEGORY,
+    CONF_FILTERS,
     CONF_FORCE_UPDATE,
     CONF_ICON,
     CONF_ID,
@@ -77,18 +78,34 @@ CONF_ROLE = "role"
 
 # Per-entity overrides, keyed by the entity "id" used in the lists below, e.g.:
 #   tesla_ble_vehicle:
+#     entities_default: none               # opt-in mode: everything off unless listed below
 #     entities:
 #       climate: { disabled: true }        # entity is not created at all
-#       battery_level: { internal: true }  # created, hidden from UI/API/MQTT
-#       doors: { name: "Front Doors" }      # rename without editing the lists
+#       battery_level: { disabled: false, filters: [{sliding_window_moving_average: {window_size: 5, send_every: 5}}] }
+#       range: { disabled: false, unit: "km" }
+#       asleep: { disabled: false, filters: [{delayed_on: 30s}] }
+#       doors: { disabled: false, name: "Front Doors" }
 # This is what lets a fork/override keep customizations in YAML instead of
-# editing the ENTITY DEFINITIONS below.
+# editing the ENTITY DEFINITIONS below. `filters` only applies to sensor,
+# binary_sensor, and text_sensor entities (the read-only, publish_* driven
+# ones) - any filter documented at https://esphome.io/components/sensor/
+# #sensor-filters (or the binary_sensor/text_sensor equivalents) works here
+# too. `unit` only applies to sensor and number entities. The schema for each
+# id is built below (see ENTITY_OVERRIDE_SCHEMAS), once the entity lists and
+# `mqtt_kind` are known, so `filters` is validated against the *correct*
+# platform's filter registry per entity, and unknown ids/keys are rejected
+# with a normal ESPHome config error instead of silently doing nothing.
 CONF_ENTITIES = "entities"
-ENTITY_OVERRIDE_SCHEMA = cv.Schema(
+CONF_ENTITIES_DEFAULT = "entities_default"
+_BASE_ENTITY_OVERRIDE_SCHEMA = cv.Schema(
     {
-        cv.Optional("disabled", default=False): cv.boolean,
+        # No default here on purpose: presence/absence (not just true/false)
+        # is what lets entities_default: none mean "off unless mentioned".
+        cv.Optional("disabled"): cv.boolean,
         cv.Optional("internal"): cv.boolean,
         cv.Optional("name"): cv.string,
+        cv.Optional("icon"): cv.icon,
+        cv.Optional("entity_category"): cv.entity_category,
     }
 )
 
@@ -324,6 +341,39 @@ _MQTT_ID_SCHEMA = {
 }
 
 
+def _override_schema_for(mqtt_kind):
+    """Extend the base per-entity override schema with type-specific keys.
+
+    `filters` must be validated here (against the correct platform's own
+    filter registry), not lazily at codegen time: filter entries declare
+    their own nested component ids, and ESPHome only resolves/registers ids
+    it saw during its initial full-config ID scan - one invented later, from
+    a value that was merely stored as a raw dict, fails just like the MQTT
+    ids above did before CONFIG_SCHEMA declared them properly.
+    """
+    extra = {}
+    if mqtt_kind == "sensor":
+        extra[cv.Optional("unit")] = cv.string_strict
+        extra[cv.Optional("filters")] = sensor.validate_filters
+    elif mqtt_kind == "binary_sensor":
+        extra[cv.Optional("filters")] = binary_sensor.validate_filters
+    elif mqtt_kind == "text_sensor":
+        extra[cv.Optional("filters")] = text_sensor.validate_filters
+    elif mqtt_kind == "number":
+        extra[cv.Optional("unit")] = cv.string_strict
+    return _BASE_ENTITY_OVERRIDE_SCHEMA.extend(extra)
+
+
+# One override schema per entity id (not a single generic {cv.string: ...}
+# map), so `filters`/`unit` are validated against the right platform, and a
+# typo'd entity id in `entities:` is a normal config error instead of a
+# silent no-op.
+_ENTITY_OVERRIDE_SCHEMAS = {
+    definition["id"]: _override_schema_for(mqtt_kind)
+    for definition, suffix, mqtt_kind in _entity_specs()
+}
+
+
 async def _register_mqtt(top_config, entity, definition, suffix):
     """Publish an entity via MQTT, using the id pre-declared in CONFIG_SCHEMA."""
     mqtt_id = top_config.get(_mqtt_config_key(definition, suffix))
@@ -349,8 +399,18 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_INFOTAINMENT_POLL_INTERVAL_AWAKE, default=30): cv.int_range(min=10, max=600), 
             cv.Optional(CONF_INFOTAINMENT_POLL_INTERVAL_ACTIVE, default=10): cv.int_range(min=5, max=120),
             cv.Optional(CONF_INFOTAINMENT_SLEEP_TIMEOUT, default=660): cv.int_range(min=60, max=3600),
+            # "all" (default): every entity is created unless explicitly
+            # {disabled: true}. "none": opt-in - nothing is created unless
+            # explicitly {disabled: false} in `entities:`. Handy when you
+            # only want a handful of the ~35 entities this component defines.
+            cv.Optional(CONF_ENTITIES_DEFAULT, default="all"): cv.one_of(
+                "all", "none", lower=True
+            ),
             cv.Optional(CONF_ENTITIES, default={}): cv.Schema(
-                {cv.string: ENTITY_OVERRIDE_SCHEMA}
+                {
+                    cv.Optional(entity_id): schema
+                    for entity_id, schema in _ENTITY_OVERRIDE_SCHEMAS.items()
+                }
             ),
             **_MQTT_ID_SCHEMA,
         },
@@ -378,9 +438,12 @@ def _base_config(definition, id_type, suffix, overrides=None):
         CONF_NAME: overrides.get("name", definition["name"]),
         CONF_DISABLED_BY_DEFAULT: definition.get("disabled_by_default", False),
     }
-    if "icon" in definition:
-        config[CONF_ICON] = definition["icon"]
-    if definition.get("entity_category") == "diagnostic":
+    icon = overrides.get("icon", definition.get("icon"))
+    if icon is not None:
+        config[CONF_ICON] = icon
+    if "entity_category" in overrides:
+        config[CONF_ENTITY_CATEGORY] = overrides["entity_category"]
+    elif definition.get("entity_category") == "diagnostic":
         config[CONF_ENTITY_CATEGORY] = ENTITY_CATEGORY_DIAGNOSTIC
     if "internal" in overrides:
         config[CONF_INTERNAL] = overrides["internal"]
@@ -403,11 +466,24 @@ async def _attach(var, entity, definition, top_config, mqtt_kind, suffix):
     return entity
 
 
+def _apply_filters(config, overrides):
+    """Attach a user-supplied `filters:` override, if any.
+
+    Already validated (against the right platform's filter registry) by
+    _override_schema_for() at CONFIG_SCHEMA time - see the comment there for
+    why that can't be deferred to codegen time like the rest of `overrides`.
+    """
+    overrides = overrides or {}
+    if "filters" in overrides:
+        config[CONF_FILTERS] = overrides["filters"]
+
+
 async def create_binary_sensor(var, definition, top_config, overrides=None):
     """Create a binary sensor and register with TeslaBLEVehicle using generic setter."""
     config = _with_device_class(
         _base_config(definition, binary_sensor.BinarySensor, "sensor", overrides),
         binary_sensor, definition)
+    _apply_filters(config, overrides)
     sens = await binary_sensor.new_binary_sensor(config)
     cg.add(var.set_binary_sensor(definition["id"], sens))
     await _register_mqtt(top_config, sens, definition, "sensor")
@@ -418,11 +494,13 @@ async def create_sensor(var, definition, top_config, overrides=None):
     """Create a sensor and register with TeslaBLEVehicle using generic setter."""
     config = _base_config(definition, sensor.Sensor, "sensor", overrides)
     config[CONF_FORCE_UPDATE] = False
-    if "unit" in definition:
-        config[CONF_UNIT_OF_MEASUREMENT] = definition["unit"]
+    unit = (overrides or {}).get("unit", definition.get("unit"))
+    if unit is not None:
+        config[CONF_UNIT_OF_MEASUREMENT] = unit
     if "accuracy_decimals" in definition:
         config[CONF_ACCURACY_DECIMALS] = definition["accuracy_decimals"]
     config = _with_device_class(config, sensor, definition)
+    _apply_filters(config, overrides)
     sens = await sensor.new_sensor(config)
     cg.add(var.set_sensor(definition["id"], sens))
     await _register_mqtt(top_config, sens, definition, "sensor")
@@ -433,6 +511,7 @@ async def create_text_sensor(var, definition, top_config, overrides=None):
     """Create a text sensor and register with TeslaBLEVehicle using generic setter."""
     config = _base_config(definition, text_sensor.TextSensor, "sensor", overrides)
     config[CONF_FORCE_UPDATE] = False
+    _apply_filters(config, overrides)
     sens = await text_sensor.new_text_sensor(config)
     if definition.get("setter"):
         cg.add(getattr(var, definition["setter"])(sens))
@@ -464,8 +543,9 @@ async def create_number(var, definition, top_config, overrides=None):
         max_val = top_config.get(CONF_CHARGING_AMPS_MAX, DEFAULT_CHARGING_AMPS_MAX)
     num_config = _base_config(definition, definition["class"], "number", overrides)
     num_config[CONF_MODE] = number.NUMBER_MODES['AUTO']
-    if "unit" in definition:
-        num_config[CONF_UNIT_OF_MEASUREMENT] = definition["unit"]
+    unit = (overrides or {}).get("unit", definition.get("unit"))
+    if unit is not None:
+        num_config[CONF_UNIT_OF_MEASUREMENT] = unit
     num = await number.new_number(
         num_config,
         min_value=definition["min"],
@@ -531,9 +611,16 @@ async def to_code(config):
     cg.add(var.set_infotainment_sleep_timeout(config[CONF_INFOTAINMENT_SLEEP_TIMEOUT] * 1000))
     
     entity_overrides = config[CONF_ENTITIES]
+    default_disabled = config[CONF_ENTITIES_DEFAULT] == "none"
 
     def _overrides_for(definition):
         return entity_overrides.get(definition["id"])
+
+    def _is_disabled(definition):
+        overrides = _overrides_for(definition)
+        if overrides and "disabled" in overrides:
+            return overrides["disabled"]
+        return default_disabled
 
     for creators in (
         (BINARY_SENSORS, create_binary_sensor),
@@ -545,20 +632,17 @@ async def to_code(config):
         (COVERS, create_cover),
     ):
         for definition in creators[0]:
-            overrides = _overrides_for(definition)
-            if overrides and overrides.get("disabled"):
+            if _is_disabled(definition):
                 continue
-            await creators[1](var, definition, config, overrides)
+            await creators[1](var, definition, config, _overrides_for(definition))
 
     for definition in NUMBERS:
-        overrides = _overrides_for(definition)
-        if overrides and overrides.get("disabled"):
+        if _is_disabled(definition):
             continue
-        await create_number(var, definition, config, overrides)
+        await create_number(var, definition, config, _overrides_for(definition))
 
-    climate_overrides = _overrides_for(CLIMATE)
-    if not (climate_overrides and climate_overrides.get("disabled")):
-        await create_climate_entity(var, CLIMATE, config, climate_overrides)
+    if not _is_disabled(CLIMATE):
+        await create_climate_entity(var, CLIMATE, config, _overrides_for(CLIMATE))
 
 
 # =============================================================================
