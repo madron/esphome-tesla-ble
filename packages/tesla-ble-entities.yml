@@ -1,0 +1,403 @@
+# =============================================================================
+# Tesla BLE vehicle - entity reference (documentation)
+# =============================================================================
+#
+# This file lists EVERY entity the tesla_ble_vehicle component can create,
+# with each entity's built-in DEFAULT parameters. It is primarily a
+# copy-paste reference: open it, delete what you don't want, edit what you
+# want to change, and merge the result into your own config.
+#
+# How to read it:
+#   name / icon / unit / entity_category   -> overridable, values here are
+#                                             the component's built-in
+#                                             defaults (keep or edit)
+#   internal / disabled / filters           -> runtime/ESPHome options
+#   "fixed:" comments                      -> not settable from YAML here
+#                                             (device_class, accuracy_decimals,
+#                                             disabled_by_default, min/max/step,
+#                                             climate visual range)
+#
+# Semantics (see components/tesla_ble_vehicle/__init__.py):
+#   tesla_ble_vehicle:
+#     entities_default: all      # default: every entity is created unless it
+#                                # is listed here with { disabled: true }
+#     entities_default: none     # opt-in: nothing is created unless it is
+#                                # listed here (listing = enabled, even with
+#                                # no other keys; explicit disabled: true on a
+#                                # listed id still turns it off)
+#
+#   Extra keys by entity type:
+#     sensor / number            -> unit: "..."
+#     sensor / binary_sensor /
+#     text_sensor                -> filters: [...]  (standard ESPHome filters,
+#                                # e.g. sliding_window_moving_average,
+#                                # delayed_on, throttle, ... see
+#                                # esphome.io/components/sensor/#sensor-filters)
+#     all entities               -> disabled:, internal:, name:, icon:,
+#                                   entity_category:
+#
+# CAUTION: including this whole file (e.g. under packages:) ENABLES every
+# entity with its defaults. Don't include it as-is if you trim entities.
+#
+# NOTE: with role: CHARGING_MANAGER the car itself refuses control commands
+# that need DRIVER rights (locks, covers, climate, ...), but it still
+# publishes the matching sensors.
+
+tesla_ble_vehicle:
+  entities:
+
+    # ============================================================
+    # Binary sensors
+    # ============================================================
+
+    asleep:
+      name: "Asleep"
+      icon: "mdi:sleep"
+
+    user_present:
+      name: "User Present"
+      icon: "mdi:account-check"
+      # fixed: device_class: occupancy
+
+    charger:
+      name: "Charger"
+      icon: "mdi:power-plug"
+      # fixed: device_class: plug
+
+    parking_brake:
+      name: "Parking Brake"
+      icon: "mdi:car-brake-parking"
+
+    # Individual closure sensors (built-in disabled_by_default: true,
+    # since covers/locks show aggregate state)
+    door_driver_front:
+      name: "Door Driver Front"
+      icon: "mdi:car-door"
+      # fixed: device_class: door, disabled_by_default: true
+
+    door_driver_rear:
+      name: "Door Driver Rear"
+      icon: "mdi:car-door"
+      # fixed: device_class: door, disabled_by_default: true
+
+    door_passenger_front:
+      name: "Door Passenger Front"
+      icon: "mdi:car-door"
+      # fixed: device_class: door, disabled_by_default: true
+
+    door_passenger_rear:
+      name: "Door Passenger Rear"
+      icon: "mdi:car-door"
+      # fixed: device_class: door, disabled_by_default: true
+
+    window_driver_front:
+      name: "Window Driver Front"
+      icon: "mdi:car-door"
+      # fixed: device_class: window, disabled_by_default: true
+
+    window_driver_rear:
+      name: "Window Driver Rear"
+      icon: "mdi:car-door"
+      # fixed: device_class: window, disabled_by_default: true
+
+    window_passenger_front:
+      name: "Window Passenger Front"
+      icon: "mdi:car-door"
+      # fixed: device_class: window, disabled_by_default: true
+
+    window_passenger_rear:
+      name: "Window Passenger Rear"
+      icon: "mdi:car-door"
+      # fixed: device_class: window, disabled_by_default: true
+
+    sunroof:
+      name: "Sunroof"
+      icon: "mdi:car-select"
+      # fixed: device_class: window, disabled_by_default: true
+
+    # ============================================================
+    # Sensors
+    # ============================================================
+
+    battery_level:
+      name: "Battery"
+      icon: "mdi:battery"
+      unit: "%"
+
+    range:
+      name: "Range"
+      icon: "mdi:map-marker-distance"
+      unit: "mi"
+      # fixed: device_class: distance
+
+    charger_power:
+      name: "Charger Power"
+      icon: "mdi:flash"
+      unit: "kW"
+      # fixed: device_class: power
+
+    charger_voltage:
+      name: "Charger Voltage"
+      icon: "mdi:lightning-bolt"
+      unit: "V"
+      # fixed: device_class: voltage
+
+    charger_current:
+      name: "Charger Current"
+      icon: "mdi:current-ac"
+      unit: "A"
+      # fixed: device_class: current
+
+    evse_max_current:
+      name: "Charger Max"
+      icon: "mdi:ev-plug-tesla"
+      unit: "A"
+      # fixed: device_class: current
+
+    charge_current_request:
+      name: "Requested Current"
+      icon: "mdi:current-ac"
+      unit: "A"
+      entity_category: diagnostic
+      # fixed: device_class: current, disabled_by_default: true
+
+    vehicle_max_charge_current:
+      name: "Car Max Acceptable"
+      icon: "mdi:car-battery"
+      unit: "A"
+      # fixed: device_class: current
+
+    charger_phases:
+      name: "Charger Phases"
+      icon: "mdi:sine-wave"
+      unit: ""
+      # fixed: accuracy_decimals: 0
+
+    charger_power_estimated:
+      name: "Charger Power Estimated"
+      icon: "mdi:flash"
+      unit: "kW"
+      # fixed: device_class: power, accuracy_decimals: 2
+
+    charging_rate:
+      name: "Charging Rate"
+      icon: "mdi:speedometer"
+      unit: "mph"
+      # fixed: device_class: speed, accuracy_decimals: 1
+
+    energy_added:
+      name: "Energy Added"
+      icon: "mdi:battery-charging"
+      unit: "kWh"
+      # fixed: device_class: energy, accuracy_decimals: 1
+
+    time_to_full:
+      name: "Time to Full"
+      icon: "mdi:clock-outline"
+      unit: "min"
+      # fixed: device_class: duration
+
+    outside_temp:
+      name: "Outside Temperature"
+      icon: "mdi:thermometer"
+      unit: "°C"
+      # fixed: device_class: temperature, accuracy_decimals: 1
+
+    odometer:
+      name: "Odometer"
+      icon: "mdi:counter"
+      unit: "mi"
+      # fixed: device_class: distance, disabled_by_default: true
+
+    tpms_front_left:
+      name: "TPMS Front Left"
+      icon: "mdi:car-tire-alert"
+      unit: "bar"
+      # fixed: device_class: pressure, accuracy_decimals: 1
+
+    tpms_front_right:
+      name: "TPMS Front Right"
+      icon: "mdi:car-tire-alert"
+      unit: "bar"
+      # fixed: device_class: pressure, accuracy_decimals: 1
+
+    tpms_rear_left:
+      name: "TPMS Rear Left"
+      icon: "mdi:car-tire-alert"
+      unit: "bar"
+      # fixed: device_class: pressure, accuracy_decimals: 1
+
+    tpms_rear_right:
+      name: "TPMS Rear Right"
+      icon: "mdi:car-tire-alert"
+      unit: "bar"
+      # fixed: device_class: pressure, accuracy_decimals: 1
+
+    # ============================================================
+    # Text sensors
+    # ============================================================
+
+    charging_state:
+      name: "Charging"
+      icon: "mdi:ev-station"
+
+    iec61851_state:
+      name: "IEC 61851"
+      icon: "mdi:ev-plug-type2"
+      # fixed: disabled_by_default: true
+
+    shift_state:
+      name: "Shift State"
+      icon: "mdi:car-shift-pattern"
+      # fixed: disabled_by_default: true
+
+    charge_limit_reason:
+      name: "Charge Limit Reason"
+      icon: "mdi:ev-plug-tesla"
+
+    last_command:
+      name: "Last Command"
+      icon: "mdi:history"
+      entity_category: diagnostic
+      # fixed: disabled_by_default: true
+
+    # ============================================================
+    # Buttons
+    # ============================================================
+
+    wake:
+      name: "Wake up"
+      icon: "mdi:sleep-off"
+
+    pair:
+      name: "Pair BLE Key"
+      icon: "mdi:key-wireless"
+      entity_category: diagnostic
+
+    regenerate_key:
+      name: "Regenerate key"
+      icon: "mdi:key-change"
+      entity_category: diagnostic
+      # fixed: disabled_by_default: true
+
+    force_update:
+      name: "Force data update"
+      icon: "mdi:database-sync"
+      entity_category: diagnostic
+
+    unlatch_driver_door:
+      name: "Unlatch Driver Door"
+      icon: "mdi:car-door"
+      # fixed: disabled_by_default: true
+
+    flash_lights:
+      name: "Flash Lights"
+      icon: "mdi:car-light-high"
+
+    honk_horn:
+      name: "Sound Horn"
+      icon: "mdi:bullhorn"
+
+    # ============================================================
+    # Switches
+    # (charging state auto-syncs to the vehicle's reported state)
+    # ============================================================
+
+    charging:
+      name: "Charger"
+      icon: "mdi:ev-station"
+
+    steering_wheel_heat:
+      name: "Heated Steering"
+      icon: "mdi:steering"
+
+    sentry_mode:
+      name: "Sentry Mode"
+      icon: "mdi:shield-car"
+
+    # ============================================================
+    # Locks
+    # ============================================================
+
+    doors:
+      name: "Doors"
+      icon: "mdi:car-door-lock"
+
+    charge_port_latch:
+      name: "Charge Port Latch"
+      icon: "mdi:ev-plug-tesla"
+
+    # ============================================================
+    # Covers
+    # ============================================================
+
+    trunk:
+      name: "Trunk"
+      icon: "mdi:car-back"
+      # fixed: device_class: door
+
+    frunk:
+      name: "Frunk"
+      icon: "mdi:car"
+      # fixed: device_class: door
+
+    windows:
+      name: "Windows"
+      icon: "mdi:car-door"
+      # fixed: device_class: awning
+
+    charge_port_door:
+      name: "Charge Port Door"
+      icon: "mdi:ev-plug-tesla"
+      # fixed: device_class: door
+
+    # ============================================================
+    # Climate
+    # ============================================================
+
+    climate:
+      name: "Climate"
+      # fixed: visual temperature range and accuracy_decimals are set by the
+      # component; use climate: { disabled: true } to remove the entity
+
+    # ============================================================
+    # Numbers
+    # ============================================================
+
+    charging_amps:
+      name: "Charging Amps"
+      icon: "mdi:current-ac"
+      unit: "A"
+      # fixed: min 0, step 1, max = charging_amps_max (config, default 32)
+
+    charging_limit:
+      name: "Charging Limit"
+      icon: "mdi:battery-charging-100"
+      unit: "%"
+      # fixed: min 50, max 100, step 1
+
+# =============================================================================
+# Customization examples (commented - copy/adapt the ones you want)
+# =============================================================================
+#
+# tesla_ble_vehicle:
+#   entities_default: none               # opt-in: only listed ids are created
+#   entities:
+#     battery_level:
+#       filters:
+#         - sliding_window_moving_average:
+#             window_size: 5
+#             send_every: 5
+#       icon: "mdi:battery-charging-100"
+#     range:
+#       unit: "km"                       # mi -> km
+#     asleep:
+#       filters:
+#         - delayed_on: 30s
+#     doors:
+#       name: "Front Doors"
+#     trunk:
+#       disabled: true                   # remove the trunk cover entirely
+#     climate:
+#       disabled: true
+# =====================================================================
